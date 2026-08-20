@@ -13,14 +13,15 @@ async function ensureHistoricalStandings(){
 window.ensureHistoricalStandings=ensureHistoricalStandings;
 async function loadSeasonStandingsMovement(h){
   const league=h.league||{},lid=league.league_id,season=String(league.season||'Season');
-  const playoffStart=Number(league.settings?.playoff_week_start||0),leg=Number(league.settings?.leg||0);
-  const maxRegular=playoffStart>1?playoffStart-1:Math.max(leg,1);
+  const playoffStart=Number(league.settings?.playoff_week_start||0),leg=Number(league.settings?.leg||0),isCurrent=String(lid)===String(LEAGUE);
+  const scheduledRegular=playoffStart>1?playoffStart-1:Math.max(leg,1),maxRegular=isCurrent?Math.max(0,Math.min(scheduledRegular,leg-1)):scheduledRegular;
   const weeks=await Promise.all(Array.from({length:maxRegular},(_,i)=>safe(`/league/${lid}/matchups/${i+1}`,[])));
   const rosterIds=h.rosters.map(r=>Number(r.roster_id));
   const state=new Map(rosterIds.map(rid=>[rid,{rid,w:0,l:0,t:0,pf:0}]));
   const points=[];
   weeks.forEach((matchups,wi)=>{
     const valid=(matchups||[]).filter(m=>state.has(Number(m.roster_id)));
+    if(!valid.length)return;
     const groups={};valid.forEach(m=>(groups[m.matchup_id]??=[]).push(m));
     valid.forEach(m=>{const x=state.get(Number(m.roster_id));x.pf+=Number(m.points||0)});
     Object.values(groups).filter(g=>g.length===2).forEach(([a,b])=>{const A=state.get(Number(a.roster_id)),B=state.get(Number(b.roster_id)),ap=Number(a.points||0),bp=Number(b.points||0);if(ap>bp){A.w++;B.l++}else if(bp>ap){B.w++;A.l++}else{A.t++;B.t++}});
@@ -29,7 +30,7 @@ async function loadSeasonStandingsMovement(h){
     points.push({label:`W${wi+1}`,week:wi+1,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,rankMap.get(rid)]))});
   });
   const finalRanks=finalPlacementMap(h);
-  if(finalRanks.size){points.push({label:'Final',week:maxRegular+1,final:true,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,finalRanks.get(rid)||null]))})}
+  if(h.champ&&finalRanks.size){points.push({label:'Final',week:maxRegular+1,final:true,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,finalRanks.get(rid)||null]))})}
   const finalOrder=rosterIds.map(rid=>({rid,rank:finalRanks.get(rid)||999})).sort((a,b)=>a.rank-b.rank);
   return{season,lid,h,points,finalOrder,maxRegular};
 }
@@ -53,18 +54,18 @@ function historicalStandingsPanel(){
   if(historicalStandingsLoading||!historicalStandingsLoaded)return'<div class="card"><strong>Building week-by-week standings history…</strong><p class="muted">League HQ is reconstructing cumulative standings from every Sleeper matchup week.</p></div>';
   if(historicalStandingsError)return `<div class="card notice">${esc(historicalStandingsError)}</div>`;
   const seasons=[...historicalStandingsData].sort((a,b)=>Number(b.season)-Number(a.season));
-  return `<div class="section-panel"><div class="panel-heading"><div><div class="eyebrow">WEEK-BY-WEEK MOVEMENT</div><h2>Standings History</h2></div><p class="muted">Expand a season to see where every franchise ranked after each week. Completed seasons finish with playoff placement, so the champion ends at #1.</p></div><div class="standings-season-list">${seasons.map(s=>historicalSeasonCard(s)).join('')}</div></div>`;
+  return `<div class="section-panel"><div class="panel-heading"><div><div class="eyebrow">WEEK-BY-WEEK MOVEMENT</div><h2>Standings History</h2></div><p class="muted">Expand a season to see where every franchise ranked after each completed week. Completed seasons finish with playoff placement, so the champion ends at #1.</p></div><div class="standings-season-list">${seasons.map(s=>historicalSeasonCard(s)).join('')}</div></div>`;
 }
 function historicalSeasonCard(s){
-  const open=expandedStandingsSeason===String(s.season),final=s.finalOrder.filter(x=>x.rank<999),champ=final[0];
-  return `<div class="card standings-season-card ${open?'open':''}"><button class="standings-season-summary" onclick="toggleStandingsSeason('${esc(s.season)}')"><div><div class="season-year">${esc(s.season)}</div><small>${s.points.filter(x=>!x.final).length} regular-season weeks${s.points.some(x=>x.final)?' · playoff finish included':''}</small></div><div class="standings-final-preview">${final.slice(0,5).map(x=>`<span><b>#${x.rank}</b> ${esc(s.h.uname(x.rid))}</span>`).join('')}</div><div class="standings-expand-icon">${open?'−':'+'}</div></button>${open?`<div class="standings-season-detail"><div class="standings-final-grid">${final.map(x=>`<div><span>#${x.rank}</span><strong>${esc(s.h.uname(x.rid))}</strong></div>`).join('')}</div><div id="standings-chart-wrap-${esc(s.season)}" class="standings-chart-wrap"><div class="standings-chart-toolbar"><div><strong>${esc(s.season)} Standings Movement</strong><small>Click a team in the legend to isolate/highlight it.</small></div><button onclick="toggleStandingsChartExpand('${esc(s.season)}')">⛶ Expand</button></div><div class="standings-chart-scroll"><svg id="standings-chart-${esc(s.season)}" class="standings-chart" role="img" aria-label="${esc(s.season)} week by week standings chart"></svg></div><div id="standings-legend-${esc(s.season)}" class="standings-chart-legend"></div></div></div>`:''}</div>`;
+  const open=expandedStandingsSeason===String(s.season),final=s.finalOrder.filter(x=>x.rank<999),complete=!!s.h.champ;
+  return `<div class="card standings-season-card ${open?'open':''}"><button class="standings-season-summary" onclick="toggleStandingsSeason('${esc(s.season)}')"><div><div class="season-year">${esc(s.season)}</div><small>${s.points.filter(x=>!x.final).length} completed regular-season weeks${s.points.some(x=>x.final)?' · playoff finish included':''}</small></div><div class="standings-final-preview">${final.slice(0,5).map(x=>`<span><b>#${x.rank}</b> ${esc(s.h.uname(x.rid))}</span>`).join('')}</div><div class="standings-expand-icon">${open?'−':'+'}</div></button>${open?`<div class="standings-season-detail">${complete?`<div class="standings-final-grid">${final.map(x=>`<div><span>#${x.rank}</span><strong>${esc(s.h.uname(x.rid))}</strong></div>`).join('')}</div>`:''}<div id="standings-chart-wrap-${esc(s.season)}" class="standings-chart-wrap"><div class="standings-chart-toolbar"><div><strong>${esc(s.season)} Standings Movement</strong><small>Click a team in the legend to isolate/highlight it.</small></div><button onclick="toggleStandingsChartExpand('${esc(s.season)}')">⛶ Expand</button></div><div class="standings-chart-scroll"><svg id="standings-chart-${esc(s.season)}" class="standings-chart" role="img" aria-label="${esc(s.season)} week by week standings chart"></svg></div><div id="standings-legend-${esc(s.season)}" class="standings-chart-legend"></div></div></div>`:''}</div>`;
 }
 function drawStandingsChart(season){
   const s=historicalStandingsData.find(x=>String(x.season)===String(season)),svg=document.getElementById(`standings-chart-${season}`),legend=document.getElementById(`standings-legend-${season}`);if(!s||!svg||!legend)return;
-  const n=s.h.rosters.length,pts=s.points;if(!pts.length){svg.innerHTML='<text x="20" y="40">No weekly standings data available.</text>';return}
+  const n=s.h.rosters.length,pts=s.points;if(!pts.length){svg.setAttribute('viewBox','0 0 800 160');svg.innerHTML='<text x="28" y="82" fill="currentColor" font-size="16">No completed weekly standings data yet.</text>';legend.innerHTML='';return}
   const width=Math.max(900,pts.length*78+160),height=Math.max(500,n*36+130),m={l:72,r:42,t:35,b:65},innerW=width-m.l-m.r,innerH=height-m.t-m.b;
   svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.style.minWidth=`${width}px`;
-  const css=getComputedStyle(document.documentElement),muted=css.getPropertyValue('--muted').trim()||'#8190a5',line=css.getPropertyValue('--line').trim()||'#263449',text=css.getPropertyValue('--text').trim()||'#fff';
+  const css=getComputedStyle(document.documentElement),muted=css.getPropertyValue('--muted').trim()||'#8190a5',line=css.getPropertyValue('--line').trim()||'#263449';
   const colors=['#67e8a5','#60a5fa','#f59e0b','#f472b6','#a78bfa','#22d3ee','#fb7185','#84cc16','#f97316','#c084fc','#2dd4bf','#eab308','#38bdf8','#f43f5e'];
   const x=i=>m.l+(pts.length===1?innerW/2:i*innerW/(pts.length-1)),y=rank=>m.t+(Number(rank)-1)*innerH/Math.max(1,n-1),focus=standingsChartFocus[String(season)];
   let out=`<rect x="0" y="0" width="${width}" height="${height}" fill="transparent"/>`;
