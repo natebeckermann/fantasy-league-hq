@@ -4,8 +4,7 @@ async function ensureHistoricalStandings(){
   historicalStandingsLoading=true;historicalStandingsError='';
   try{
     if(typeof ensureHistory==='function')await ensureHistory();
-    const seasons=HIST||[];
-    historicalStandingsData=await Promise.all(seasons.map(loadSeasonStandingsMovement));
+    historicalStandingsData=await Promise.all((HIST||[]).map(loadSeasonStandingsMovement));
     historicalStandingsLoaded=true;
   }catch(e){historicalStandingsError=e?.message||'Could not load historical standings';historicalStandingsData=[]}
   historicalStandingsLoading=false;if(S.view==='history'&&historyTab==='standings')render();
@@ -20,27 +19,47 @@ async function loadSeasonStandingsMovement(h){
   const state=new Map(rosterIds.map(rid=>[rid,{rid,w:0,l:0,t:0,pf:0}]));
   const points=[];
   weeks.forEach((matchups,wi)=>{
-    const valid=(matchups||[]).filter(m=>state.has(Number(m.roster_id)));
-    if(!valid.length)return;
+    const valid=(matchups||[]).filter(m=>state.has(Number(m.roster_id)));if(!valid.length)return;
     const groups={};valid.forEach(m=>(groups[m.matchup_id]??=[]).push(m));
     valid.forEach(m=>{const x=state.get(Number(m.roster_id));x.pf+=Number(m.points||0)});
     Object.values(groups).filter(g=>g.length===2).forEach(([a,b])=>{const A=state.get(Number(a.roster_id)),B=state.get(Number(b.roster_id)),ap=Number(a.points||0),bp=Number(b.points||0);if(ap>bp){A.w++;B.l++}else if(bp>ap){B.w++;A.l++}else{A.t++;B.t++}});
-    const ranked=[...state.values()].sort((a,b)=>b.w-a.w||b.t-a.t||b.pf-a.pf||a.rid-b.rid);
-    const rankMap=new Map(ranked.map((x,i)=>[x.rid,i+1]));
+    const ranked=[...state.values()].sort((a,b)=>b.w-a.w||b.t-a.t||b.pf-a.pf||a.rid-b.rid),rankMap=new Map(ranked.map((x,i)=>[x.rid,i+1]));
     points.push({label:`W${wi+1}`,week:wi+1,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,rankMap.get(rid)]))});
   });
   const finalRanks=finalPlacementMap(h);
-  if(h.champ&&finalRanks.size){points.push({label:'Final',week:maxRegular+1,final:true,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,finalRanks.get(rid)||null]))})}
+  if(h.champ&&finalRanks.size===rosterIds.length)points.push({label:'Final',week:maxRegular+1,final:true,ranks:Object.fromEntries(rosterIds.map(rid=>[rid,finalRanks.get(rid)||null]))});
   const finalOrder=rosterIds.map(rid=>({rid,rank:finalRanks.get(rid)||999})).sort((a,b)=>a.rank-b.rank);
   return{season,lid,h,points,finalOrder,maxRegular};
 }
+function gameLoser(g){const w=Number(g?.w||0),a=Number(g?.t1||0),b=Number(g?.t2||0);if(!w)return 0;return a===w?b:a}
 function finalPlacementMap(h){
-  const out=new Map,all=[...(h.winners||[]),...(h.losers||[])];
-  all.forEach(g=>{const p=Number(g.p||0);if(!p)return;if(g.w)out.set(Number(g.w),p);const loser=Number(g.t1)===Number(g.w)?Number(g.t2):Number(g.t1);if(loser)out.set(loser,p+1)});
-  if(h.champ){const champRoster=h.rosters.find(r=>h.uname(r.roster_id)===h.champ);if(champRoster)out.set(Number(champRoster.roster_id),1)}
-  if(h.runner){const runner=h.rosters.find(r=>h.uname(r.roster_id)===h.runner);if(runner)out.set(Number(runner.roster_id),2)}
-  const used=new Set(out.values()),remaining=[...h.standings].filter(r=>!out.has(Number(r.roster_id)));
-  let next=1;remaining.forEach(r=>{while(used.has(next))next++;out.set(Number(r.roster_id),next);used.add(next);next++});
+  const out=new Map(),winners=h.winners||[],losers=h.losers||[];
+  // Championship bracket determines playoff places normally: p=1 -> 1st/2nd, p=3 -> 3rd/4th, etc.
+  winners.forEach(g=>{const p=Number(g.p||0),w=Number(g.w||0),l=gameLoser(g);if(p&&w){out.set(w,p);if(l)out.set(l,p+1)}});
+  // Explicit champion/runner-up from the p=1 championship is authoritative.
+  const titleGame=winners.find(g=>Number(g.p)===1&&g.w);
+  if(titleGame){out.set(Number(titleGame.w),1);const l=gameLoser(titleGame);if(l)out.set(l,2)}
+  // Sleeper Toilet Bowl is loser-advances toward last place. For this league, non-playoff teams
+  // split in the terminal round into a 7th/8th placement game (prior-round winners) and a
+  // 9th/10th "King/Last Place" game (prior-round losers). Parse that structure directly.
+  const playoffIds=new Set();winners.forEach(g=>[g.t1,g.t2,g.w].forEach(x=>{if(Number(x))playoffIds.add(Number(x))}));
+  const nonPlayoffIds=h.rosters.map(r=>Number(r.roster_id)).filter(rid=>!playoffIds.has(rid));
+  if(losers.length&&nonPlayoffIds.length){
+    const maxRound=Math.max(...losers.map(g=>Number(g.r||0))),terminal=losers.filter(g=>Number(g.r||0)===maxRound),prior=losers.filter(g=>Number(g.r||0)===maxRound-1);
+    const priorWinners=new Set(prior.map(g=>Number(g.w||0)).filter(Boolean)),priorLosers=new Set(prior.map(gameLoser).filter(Boolean));
+    const base=playoffIds.size+1;
+    const topGame=terminal.find(g=>priorWinners.has(Number(g.t1))&&priorWinners.has(Number(g.t2)));
+    const bottomGame=terminal.find(g=>priorLosers.has(Number(g.t1))&&priorLosers.has(Number(g.t2)));
+    if(topGame){const w=Number(topGame.w||0),l=gameLoser(topGame);if(w)out.set(w,base);if(l)out.set(l,base+1)}
+    if(bottomGame){const w=Number(bottomGame.w||0),l=gameLoser(bottomGame);if(w)out.set(w,base+2);if(l)out.set(l,base+3)}
+    // Fallback for any unresolved consolation teams: preserve their regular-season order in the remaining slots.
+    const unresolved=nonPlayoffIds.filter(rid=>!out.has(rid));
+    const used=new Set(out.values()),regular=[...h.standings].map(r=>Number(r.roster_id)).filter(rid=>unresolved.includes(rid));
+    let slot=base;regular.forEach(rid=>{while(used.has(slot))slot++;out.set(rid,slot);used.add(slot);slot++});
+  }
+  // Final fallback ensures every roster has a unique place even if Sleeper omits a placement game.
+  const used=new Set(out.values()),remaining=[...h.standings].filter(r=>!out.has(Number(r.roster_id)));let next=1;
+  remaining.forEach(r=>{while(used.has(next))next++;out.set(Number(r.roster_id),next);used.add(next);next++});
   return out;
 }
 function toggleStandingsSeason(season){expandedStandingsSeason=expandedStandingsSeason===String(season)?null:String(season);render();setTimeout(()=>{if(expandedStandingsSeason)drawStandingsChart(expandedStandingsSeason)},0)}
@@ -54,11 +73,11 @@ function historicalStandingsPanel(){
   if(historicalStandingsLoading||!historicalStandingsLoaded)return'<div class="card"><strong>Building week-by-week standings history…</strong><p class="muted">League HQ is reconstructing cumulative standings from every Sleeper matchup week.</p></div>';
   if(historicalStandingsError)return `<div class="card notice">${esc(historicalStandingsError)}</div>`;
   const seasons=[...historicalStandingsData].sort((a,b)=>Number(b.season)-Number(a.season));
-  return `<div class="section-panel"><div class="panel-heading"><div><div class="eyebrow">WEEK-BY-WEEK MOVEMENT</div><h2>Standings History</h2></div><p class="muted">Expand a season to see where every franchise ranked after each completed week. Completed seasons finish with playoff placement, so the champion ends at #1.</p></div><div class="standings-season-list">${seasons.map(s=>historicalSeasonCard(s)).join('')}</div></div>`;
+  return `<div class="section-panel"><div class="panel-heading"><div><div class="eyebrow">WEEK-BY-WEEK MOVEMENT</div><h2>Standings History</h2></div><p class="muted">Expand a season to see where every franchise ranked after each completed week. Completed seasons combine the championship bracket and Toilet Bowl so every team finishes 1 through ${S.rosters.length}.</p></div><div class="standings-season-list">${seasons.map(s=>historicalSeasonCard(s)).join('')}</div></div>`;
 }
 function historicalSeasonCard(s){
   const open=expandedStandingsSeason===String(s.season),final=s.finalOrder.filter(x=>x.rank<999),complete=!!s.h.champ;
-  return `<div class="card standings-season-card ${open?'open':''}"><button class="standings-season-summary" onclick="toggleStandingsSeason('${esc(s.season)}')"><div><div class="season-year">${esc(s.season)}</div><small>${s.points.filter(x=>!x.final).length} completed regular-season weeks${s.points.some(x=>x.final)?' · playoff finish included':''}</small></div><div class="standings-final-preview">${final.slice(0,5).map(x=>`<span><b>#${x.rank}</b> ${esc(s.h.uname(x.rid))}</span>`).join('')}</div><div class="standings-expand-icon">${open?'−':'+'}</div></button>${open?`<div class="standings-season-detail">${complete?`<div class="standings-final-grid">${final.map(x=>`<div><span>#${x.rank}</span><strong>${esc(s.h.uname(x.rid))}</strong></div>`).join('')}</div>`:''}<div id="standings-chart-wrap-${esc(s.season)}" class="standings-chart-wrap"><div class="standings-chart-toolbar"><div><strong>${esc(s.season)} Standings Movement</strong><small>Click a team in the legend to isolate/highlight it.</small></div><button onclick="toggleStandingsChartExpand('${esc(s.season)}')">⛶ Expand</button></div><div class="standings-chart-scroll"><svg id="standings-chart-${esc(s.season)}" class="standings-chart" role="img" aria-label="${esc(s.season)} week by week standings chart"></svg></div><div id="standings-legend-${esc(s.season)}" class="standings-chart-legend"></div></div></div>`:''}</div>`;
+  return `<div class="card standings-season-card ${open?'open':''}"><button class="standings-season-summary" onclick="toggleStandingsSeason('${esc(s.season)}')"><div><div class="season-year">${esc(s.season)}</div><small>${s.points.filter(x=>!x.final).length} completed regular-season weeks${s.points.some(x=>x.final)?' · full playoff + Toilet Bowl finish included':''}</small></div><div class="standings-final-preview">${final.slice(0,5).map(x=>`<span><b>#${x.rank}</b> ${esc(s.h.uname(x.rid))}</span>`).join('')}</div><div class="standings-expand-icon">${open?'−':'+'}</div></button>${open?`<div class="standings-season-detail">${complete?`<div class="standings-final-grid">${final.map(x=>`<div><span>#${x.rank}</span><strong>${esc(s.h.uname(x.rid))}</strong></div>`).join('')}</div>`:''}<div id="standings-chart-wrap-${esc(s.season)}" class="standings-chart-wrap"><div class="standings-chart-toolbar"><div><strong>${esc(s.season)} Standings Movement</strong><small>Click a team in the legend to isolate/highlight it.</small></div><button onclick="toggleStandingsChartExpand('${esc(s.season)}')">⛶ Expand</button></div><div class="standings-chart-scroll"><svg id="standings-chart-${esc(s.season)}" class="standings-chart" role="img" aria-label="${esc(s.season)} week by week standings chart"></svg></div><div id="standings-legend-${esc(s.season)}" class="standings-chart-legend"></div></div></div>`:''}</div>`;
 }
 function drawStandingsChart(season){
   const s=historicalStandingsData.find(x=>String(x.season)===String(season)),svg=document.getElementById(`standings-chart-${season}`),legend=document.getElementById(`standings-legend-${season}`);if(!s||!svg||!legend)return;
